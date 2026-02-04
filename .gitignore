@@ -1,0 +1,9 @@
+venv/
+pyvenv.cfg
+data/
+__pycache__/
+*.nii
+*.nii.gz
+*.csv
+results/
+.DS_Store
