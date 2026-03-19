@@ -111,8 +111,7 @@ for _, row in df.iterrows():
     for v in prog_values:
         status = agent.evaluate(v)
 
-    results.append(("progression", status))
-
+    results.append((row["subject"], "progression", status))
 
     # Remission trajectory
     #
@@ -132,8 +131,7 @@ for _, row in df.iterrows():
     for v in rem_values:
         status = agent.evaluate(v)
 
-    results.append(("remission", status))
-
+    results.append((row["subject"], "remission", status))
 
 # Evaluate predictions
 #
@@ -149,7 +147,7 @@ for _, row in df.iterrows():
 correct = 0
 predictions = []
 
-for true, pred in results:
+for patient, true, pred in results:
 
     if pred == "Progression":
         pred_label = "progression"
@@ -160,6 +158,8 @@ for true, pred in results:
 
     if pred_label == true:
         correct += 1
+    else:
+        print("Disagreement on", patient, "true:", true, "predicted:", pred_label)
 
 
 accuracy = correct / len(results)
