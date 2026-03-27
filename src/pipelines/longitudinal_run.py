@@ -4,93 +4,69 @@ from typing import Dict, List
 import pandas as pd
 
 from src.agent.treatment_agent import TreatmentAgent
-from src.io.nifiti_loader import load_mask
+from src.io.nifti_loader import load_mask
+from src.io.tumor_volume_csv import load_tumor_volume_csv
 from src.metrics.volume import compute_tumor_volume
 
 
-# Load baseline segmentation and compute tumor volume from the mask.
 def compute_baseline_volume_from_mask(baseline_seg_path: str | Path) -> Dict[str, float]:
     mask_data, voxel_dims = load_mask(baseline_seg_path)
     return compute_tumor_volume(mask_data, voxel_dims)
 
 
-# Load FU1-FU5 follow-up volumes for one subject and one scenario from CSV.
-#
-# Expected scenarios:
-# - progression
-# - remission
-
-def load_followup_volumes_from_csv(
+def load_followup_volumes_from_patient_csv(
     csv_path: str | Path,
-    subject: str,
-    scenario: str,
 ) -> List[Dict[str, float | str]]:
-    csv_path = Path(csv_path)
+    df = load_tumor_volume_csv(csv_path)
 
-    if scenario not in {"progression", "remission"}:
-        raise ValueError("scenario must be 'progression' or 'remission'")
+    required_columns = {"FU", "tumor_volume"}
+    if not required_columns.issubset(df.columns):
+        raise ValueError(
+            f"CSV must contain columns {required_columns}, got {set(df.columns)}"
+        )
 
-    if not csv_path.exists():
-        raise FileNotFoundError(f"CSV file not found: {csv_path}")
-
-    df = pd.read_csv(csv_path)
-
-    if "subject" not in df.columns:
-        raise ValueError("CSV must contain column 'subject'")
-
-    row = df[df["subject"] == subject]
-
-    if row.empty:
-        raise ValueError(f"Subject {subject} not found in CSV")
-
-    row = row.iloc[0]
     followups = []
-
-    for timepoint in ["FU1", "FU2", "FU3", "FU4", "FU5"]:
-        col = f"{scenario}_{timepoint}"
-
-        if col not in df.columns:
-            raise ValueError(f"CSV missing column: {col}")
-
-        volume = row[col]
+    for _, row in df.iterrows():
+        timepoint = str(row["FU"])
+        volume = row["tumor_volume"]
 
         if pd.isna(volume):
-            raise ValueError(f"Missing value for {subject} {col}")
+            raise ValueError(f"Missing tumor_volume for {timepoint} in {csv_path}")
 
         followups.append({
             "timepoint": timepoint,
             "volume": float(volume),
         })
 
+    def sort_key(item: Dict[str, float | str]) -> int:
+        tp = str(item["timepoint"]).upper()
+        if tp.startswith("FU"):
+            try:
+                return int(tp.replace("FU", ""))
+            except ValueError:
+                return 999
+        return 999
+
+    followups = sorted(followups, key=sort_key)
     return followups
 
 
-# Run the longitudinal workflow for one subject and one scenario.
-#
-# Workflow:
-# - compute baseline volume from baseline/seg.nii
-# - load FU1-FU5 volumes from CSV
-# - evaluate each follow-up with the TreatmentAgent
-
-def run_longitudinal_pipeline(
-    baseline_seg_path: str | Path,
-    csv_path: str | Path,
-    subject: str,
+def run_longitudinal_pipeline_for_branch(
+    patient_id: str,
     scenario: str,
+    baseline_volume: float,
+    baseline_voxel_count: int,
+    followups: List[Dict[str, float | str]],
 ) -> List[Dict[str, float | str]]:
-    baseline_info = compute_baseline_volume_from_mask(baseline_seg_path)
-    baseline_volume_mm3 = baseline_info["volume_mm3"]
-
-    followups = load_followup_volumes_from_csv(csv_path, subject, scenario)
-    agent = TreatmentAgent(initial_volume=baseline_volume_mm3)
+    agent = TreatmentAgent(initial_volume=baseline_volume)
 
     results = [
         {
-            "subject": subject,
+            "patient_id": patient_id,
             "scenario": scenario,
             "timepoint": "Baseline",
-            "volume_mm3": baseline_volume_mm3,
-            "voxel_count": baseline_info["voxel_count"],
+            "volume_mm3": baseline_volume,
+            "voxel_count": baseline_voxel_count,
             "status": "Baseline",
         }
     ]
@@ -99,7 +75,7 @@ def run_longitudinal_pipeline(
         evaluation = agent.evaluate(item["volume"])
 
         results.append({
-            "subject": subject,
+            "patient_id": patient_id,
             "scenario": scenario,
             "timepoint": item["timepoint"],
             "volume_mm3": item["volume"],
@@ -112,61 +88,75 @@ def run_longitudinal_pipeline(
     return results
 
 
-# Print one subject/scenario trajectory in a readable format.
-def print_results(results: List[Dict[str, float | str]]) -> None:
-    if not results:
+def run_patient_pipeline(patient_dir: str | Path) -> pd.DataFrame:
+    patient_dir = Path(patient_dir)
+    patient_id = patient_dir.name
+
+    baseline_seg_path = patient_dir / "baseline" / "seg.nii"
+    progression_csv_path = patient_dir / "progression" / "tumor_volume.csv"
+    remission_csv_path = patient_dir / "remission" / "tumor_volume.csv"
+
+    if not baseline_seg_path.exists():
+        raise FileNotFoundError(f"Missing baseline seg file: {baseline_seg_path}")
+
+    baseline_info = compute_baseline_volume_from_mask(baseline_seg_path)
+    baseline_volume_mm3 = baseline_info["volume_mm3"]
+    baseline_voxel_count = baseline_info["voxel_count"]
+
+    progression_followups = load_followup_volumes_from_patient_csv(progression_csv_path)
+    remission_followups = load_followup_volumes_from_patient_csv(remission_csv_path)
+
+    progression_results = run_longitudinal_pipeline_for_branch(
+        patient_id=patient_id,
+        scenario="progression",
+        baseline_volume=baseline_volume_mm3,
+        baseline_voxel_count=baseline_voxel_count,
+        followups=progression_followups,
+    )
+
+    remission_results = run_longitudinal_pipeline_for_branch(
+        patient_id=patient_id,
+        scenario="remission",
+        baseline_volume=baseline_volume_mm3,
+        baseline_voxel_count=baseline_voxel_count,
+        followups=remission_followups,
+    )
+
+    all_results = progression_results + remission_results
+    return pd.DataFrame(all_results)
+
+
+def print_results(df: pd.DataFrame) -> None:
+    if df.empty:
         print("No results to display.")
         return
 
-    subject = results[0]["subject"]
-    scenario = results[0]["scenario"]
+    for scenario, scenario_df in df.groupby("scenario"):
+        print(f"\nScenario: {scenario}")
+        print("-" * 60)
 
-    print(f"\nSubject: {subject}")
-    print(f"Scenario: {scenario}")
-    print("-" * 50)
-
-    for item in results:
-        if item["timepoint"] == "Baseline":
-            print(
-                f"{item['timepoint']}: "
-                f"{item['volume_mm3']:.2f} mm^3 "
-                f"(voxel_count={item['voxel_count']}, status={item['status']})"
-            )
-        else:
-            print(
-                f"{item['timepoint']}: "
-                f"{item['volume_mm3']:.2f} mm^3 -> {item['status']} "
-                f"(vs baseline: {item['percent_change_vs_baseline']:.2f}%, "
-                f"vs smallest: {item['percent_change_vs_smallest']:.2f}%)"
-            )
+        for _, row in scenario_df.iterrows():
+            if row["timepoint"] == "Baseline":
+                print(
+                    f"{row['timepoint']}: "
+                    f"{row['volume_mm3']:.2f} mm^3 "
+                    f"(voxel_count={row['voxel_count']}, status={row['status']})"
+                )
+            else:
+                print(
+                    f"{row['timepoint']}: "
+                    f"{row['volume_mm3']:.2f} mm^3 -> {row['status']} "
+                    f"(vs baseline: {row['percent_change_vs_baseline']:.2f}%, "
+                    f"vs smallest: {row['percent_change_vs_smallest']:.2f}%)"
+                )
 
 
 if __name__ == "__main__":
-
-    # Update this to the folder that contains:
-    # - Mets_XXX subject folders
-    # - tumor_volumes_all_subjects_v3.csv
-    #
-    # 
-    # DATASET_ROOT = Path("/Users/phillipovera/Downloads/series")
-
-    DATASET_ROOT = Path("/path/to/your/series")
-    
-
-    # Change to the case you want to check
-    subject = "Mets_005"
-    scenario = "progression"  # or "remission"
-
-    baseline_seg_path = DATASET_ROOT / subject / "baseline" / "seg.nii"
-    csv_path = DATASET_ROOT / "tumor_volumes_all_subjects_v3.csv"
+    PATIENT_DIR = Path("data/raw/Mets_010")
 
     try:
-        results = run_longitudinal_pipeline(
-            baseline_seg_path=baseline_seg_path,
-            csv_path=csv_path,
-            subject=subject,
-            scenario=scenario,
-        )
-        print_results(results)
+        results_df = run_patient_pipeline(PATIENT_DIR)
+        print(results_df)
+        print_results(results_df)
     except Exception as e:
         print(f"Pipeline error: {e}")
