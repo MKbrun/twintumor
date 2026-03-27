@@ -1,5 +1,6 @@
 import pandas as pd
 from collections import Counter
+from src.agent.treatment_agent import TreatmentAgent
 
 
 # Rule-based agent
@@ -21,49 +22,6 @@ from collections import Counter
 # In our dataset we use the
 # percentage of tumor signal detected in MRI scans.
 
-
-class TreatmentAgent:
-
-    def __init__(self, baseline):
-
-        # Store the baseline tumor measurement
-        self.baseline = baseline
-
-        # Keep track of the smallest tumor value observed so far
-        self.smallest = baseline
-
-
-    def evaluate(self, current):
-
-        # If the tumor becomes smaller than any previous scan,
-        # update the smallest observed value
-        if current < self.smallest:
-            self.smallest = current
-
-        # Calculate percentage change compared to baseline
-        pct_baseline = ((current - self.baseline) / self.baseline) * 100
-
-        # Calculate percentage change compared to the smallest
-        # tumor value seen so far
-        pct_small = ((current - self.smallest) / self.smallest) * 100
-
-
-        # Apply the clinical rules
-
-        # If the tumor shrinks by 50 percent or more compared
-        # to baseline, it is classified as partial remission
-        if pct_baseline <= -50:
-            return "Partial Remission"
-
-        # If the tumor grows by 25 percent or more compared
-        # to the smallest observed value, it is classified
-        # as progression
-        elif pct_small >= 25:
-            return "Progression"
-
-        # Otherwise the tumor is considered stable
-        else:
-            return "Stable Disease"
 
 
 # Load the dataset containing tumor trajectories
@@ -109,7 +67,8 @@ for _, row in df.iterrows():
     agent = TreatmentAgent(baseline)
 
     for v in prog_values:
-        status = agent.evaluate(v)
+        evaluation = agent.evaluate(v)
+        status = evaluation["status"]
 
     results.append((row["subject"], "progression", status))
 
@@ -129,7 +88,8 @@ for _, row in df.iterrows():
     agent = TreatmentAgent(baseline)
 
     for v in rem_values:
-        status = agent.evaluate(v)
+        evaluation = agent.evaluate(v)
+        status = evaluation["status"]
 
     results.append((row["subject"], "remission", status))
 

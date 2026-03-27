@@ -35,8 +35,11 @@ def compute_tumor_volume(
     # Total tumor volume
     volume_mm3 = float(voxel_count * voxel_volume_mm3)
 
+    volume_cm3 = float(volume_mm3 / 1000.0)
+
     return {
     "voxel_count": voxel_count,
     "voxel_volume_mm3": voxel_volume_mm3,
     "volume_mm3": volume_mm3,
+    "volume_cm3": volume_cm3,
 }
