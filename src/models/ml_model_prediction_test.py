@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from pathlib import Path
 
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
@@ -8,7 +9,8 @@ from sklearn.metrics import mean_absolute_error
 
 # LOAD DATA
 
-df = pd.read_csv("src/data/consistent_tumor_analysis.csv")
+CSV_PATH = Path("data/analysis/consistent_tumor_analysis.csv")
+df = pd.read_csv(CSV_PATH)
 
 # RULE-BASED AGENT
 
