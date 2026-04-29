@@ -164,14 +164,14 @@ def forecast_all_models(observed_values: list[float]):
 # ----------------------------------------------------------------------
 
 @st.cache_data
-def build_cohort_predictions(df: pd.DataFrame, _ml_model) -> pd.DataFrame:
+def build_cohort_predictions(_df: pd.DataFrame, _ml_model) -> pd.DataFrame:
     """
     For every (subject, scenario), fit exponential and Gompertz on the first
     three observed points and compare with the trained ML model. Returns a
     long-form dataframe with actual and predicted FU3/FU4/FU5 values.
     """
     records: list[dict] = []
-    for _, row in df.iterrows():
+    for _, row in _df.iterrows():
         subject = row["subject"]
         for scenario in ["progression", "remission"]:
             traj = get_trajectory(row, scenario)
@@ -359,7 +359,7 @@ with tab_single:
 
         err_df = pd.DataFrame(err_rows, columns=["Model", "MAE (FU3–FU5)"])
         err_df["MAE (FU3–FU5)"] = err_df["MAE (FU3–FU5)"].round(3)
-        st.dataframe(err_df, hide_index=True, use_container_width=True)
+        st.dataframe(err_df, hide_index=True, width="stretch")
 
         if err_rows:
             best = min(err_rows, key=lambda r: r[1])
@@ -385,7 +385,7 @@ with tab_single:
         table["gompertz"] = np.round(forecasts["Gompertz"]["full"], 3).tolist()
     table["ml"] = np.round(ml_full, 3).tolist()
     table["ml ±1σ"] = [None, None, None] + [f"±{s:.2f}" for s in ml_std]
-    st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(table), hide_index=True, width="stretch")
 
 
 # ======================================================================
@@ -694,7 +694,7 @@ with tab_compare:
     per_tp_df = pd.DataFrame(per_tp_records)
     pivot = per_tp_df.pivot(index="Model", columns="Timepoint", values="MAE").round(3)
     pivot = pivot.reindex(list(model_cols.keys()))
-    st.dataframe(pivot, use_container_width=True)
+    st.dataframe(pivot, width="stretch")
 
     # Download raw predictions
     st.markdown("### Export")
