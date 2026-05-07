@@ -10,6 +10,7 @@ from src.models.ml_predictor import (
     predict_future,
     predict_future_with_uncertainty,
     reset_model,
+    train_fresh_from,
     train_incremental,
 )
 from src.data.paths import DEMO_DATASET_CSV
@@ -102,6 +103,29 @@ def test_predict_future_returns_keys_in_baseline_units(tmp_model_path):
     # Predictions should be within a sane envelope of the baseline
     for v in out.values():
         assert 0.0 < v < 5000.0
+
+
+def test_train_fresh_replaces_existing_model(tmp_model_path, tmp_csv):
+    """train_fresh_from should produce a single-round log on the new CSV,
+    even if a model with previous training history was present."""
+    # Pre-existing model with some history
+    get_or_train(tmp_model_path, DEMO_DATASET_CSV)
+    train_incremental(
+        csv_path=tmp_csv, source_label="prior round",
+        model_path=tmp_model_path, n_new_trees=30,
+    )
+    # Now wipe and train fresh
+    model, log = train_fresh_from(
+        csv_path=tmp_csv, source_label="fresh-from-cohort",
+        model_path=tmp_model_path,
+    )
+    # Should have a single round, only those samples, only INITIAL_TREES trees
+    assert len(log) == 1
+    assert "fresh-from-cohort" in log[0].source_label
+    assert log[0].trees_before == 0
+    assert log[0].trees_after == INITIAL_TREES
+    assert len(model.estimators_) == INITIAL_TREES
+    assert log[0].n_samples == 8  # 4 patients × 2 scenarios
 
 
 def test_predict_uncertainty_shapes(tmp_model_path):

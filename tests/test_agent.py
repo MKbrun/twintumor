@@ -46,20 +46,18 @@ def test_negative_volume_rejected():
         a.evaluate(-1.0)
 
 
-# ----- Step 3: pseudoprogression -----
+# ----- Step 3: pseudoprogression (PDF flag-based, no time window) -----
 
 def test_pseudoprogression_resolves_when_next_scan_drops():
-    a = TreatmentAgent(initial_volume=100.0, enable_pseudoprogression=True, grace_window=2)
-    out1 = a.evaluate(140.0)   # +40% inside grace window -> Provisional
-    out2 = a.evaluate(105.0)   # falls back -> retroactively Pseudoprogression
+    a = TreatmentAgent(initial_volume=100.0, enable_pseudoprogression=True)
+    out1 = a.evaluate(140.0)   # first +40% growth -> Provisional flag
+    out2 = a.evaluate(105.0)   # smaller than last -> retroactively Pseudoprogression
     assert out1["status"] == STATUS_PROVISIONAL_PROGRESSION
-    final = a.final_statuses()
-    assert final[1] == STATUS_PSEUDOPROGRESSION
-    assert out2["status"] in (STATUS_STABLE, STATUS_PARTIAL_REMISSION)
+    assert a.final_statuses()[1] == STATUS_PSEUDOPROGRESSION
 
 
 def test_pseudoprogression_confirms_when_next_scan_grows_more():
-    a = TreatmentAgent(initial_volume=100.0, enable_pseudoprogression=True, grace_window=2)
+    a = TreatmentAgent(initial_volume=100.0, enable_pseudoprogression=True)
     a.evaluate(140.0)            # provisional
     a.evaluate(200.0)            # confirms
     final = a.final_statuses()
@@ -67,8 +65,27 @@ def test_pseudoprogression_confirms_when_next_scan_grows_more():
     assert final[2] == STATUS_PROGRESSION
 
 
-def test_progression_outside_grace_window_is_immediate():
-    a = TreatmentAgent(initial_volume=100.0, enable_pseudoprogression=True, grace_window=1)
-    a.evaluate(80.0)             # FU1 within grace, no progression
-    out2 = a.evaluate(120.0)     # FU2 outside grace, +50% vs smallest -> direct PD
-    assert out2["status"] == STATUS_PROGRESSION
+def test_pseudoprogression_can_fire_at_any_timepoint():
+    """The PDF's Step 3 says 'first time' growth — not 'first FU'. The flag
+    must be available at any point, not just the first scan after baseline."""
+    a = TreatmentAgent(initial_volume=100.0, enable_pseudoprogression=True)
+    a.evaluate(95.0)   # FU1 stable
+    a.evaluate(90.0)   # FU2 stable, smallest=90
+    out3 = a.evaluate(125.0)  # FU3 first growth event >= 25% vs smallest -> Provisional
+    assert out3["status"] == STATUS_PROVISIONAL_PROGRESSION
+
+
+def test_pseudoprogression_can_re_fire_after_resolution():
+    """After a pseudoprogression resolves, a later first-time growth should
+    flag again (each event is independent)."""
+    a = TreatmentAgent(initial_volume=100.0, enable_pseudoprogression=True)
+    a.evaluate(140.0)  # provisional
+    a.evaluate(80.0)   # resolves -> previous = Pseudoprogression
+    out3 = a.evaluate(120.0)  # +50% vs smallest=80 -> new flag
+    assert out3["status"] == STATUS_PROVISIONAL_PROGRESSION
+
+
+def test_pseudoprogression_off_by_default():
+    a = TreatmentAgent(initial_volume=100.0)  # enable_pseudoprogression=False
+    out = a.evaluate(140.0)
+    assert out["status"] == STATUS_PROGRESSION  # immediate, no flag
