@@ -1,9 +1,28 @@
 venv/
+.venv/
 pyvenv.cfg
-data/
 __pycache__/
+*.pyc
+.DS_Store
+results/
+
+# Patient MRI data, computed volumes, and locally trained ML models stay
+# on the user's machine — never commit them. A different user must train
+# their own model on their own data.
+data/raw/
+data/processed/
+
+# The Random-Forest model itself does not contain raw rows — it encodes
+# learned tree splits — so the persisted model file IS shared via git so
+# every clone gets the cumulative knowledge of past training rounds.
+# Patient CSVs and segmentations are NEVER committed.
+data/models/*
+!data/models/rf_predictor.joblib
+
+# Allow ONLY the bundled, anonymised demo dataset to be checked in.
+data/demo/*
+!data/demo/consistent_tumor_analysis.csv
+
+# Other artefacts
 *.nii
 *.nii.gz
-*.csv
-results/
-.DS_Store

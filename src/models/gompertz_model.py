@@ -23,10 +23,11 @@ future timepoints.
 
 from __future__ import annotations
 
+import warnings
 from typing import Tuple
 
 import numpy as np
-from scipy.optimize import curve_fit
+from scipy.optimize import OptimizeWarning, curve_fit
 
 
 def gompertz(t, V_inf: float, b: float, c: float):
@@ -58,6 +59,12 @@ def fit_gompertz(
     if np.any(values <= 0):
         raise ValueError("Gompertz fit requires strictly positive values")
 
+    # Gompertz needs some dynamic range; refuse a fit on flat / near-flat
+    # trajectories to avoid OptimizeWarning spam and meaningless parameters.
+    spread = float(np.max(values) - np.min(values))
+    if spread < 1e-6 * max(abs(float(np.mean(values))), 1.0):
+        raise ValueError("Trajectory is flat (no dynamic range) — Gompertz fit skipped")
+
     v0 = float(values[0])
     v_peak = float(np.max(values))
 
@@ -71,14 +78,16 @@ def fit_gompertz(
     upper = [v_peak * v_inf_upper_multiplier + 1e3, 20.0, 5.0]
 
     try:
-        popt, _ = curve_fit(
-            gompertz,
-            times,
-            values,
-            p0=[v_inf_guess, b_guess, c_guess],
-            bounds=(lower, upper),
-            maxfev=10000,
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", OptimizeWarning)
+            popt, _ = curve_fit(
+                gompertz,
+                times,
+                values,
+                p0=[v_inf_guess, b_guess, c_guess],
+                bounds=(lower, upper),
+                maxfev=10000,
+            )
     except Exception as exc:  # pragma: no cover - defensive
         raise RuntimeError(f"Gompertz fit failed: {exc}") from exc
 
