@@ -1,162 +1,168 @@
+"""
+Per-patient RANO pipeline:
+    seg.nii at every timepoint -> volume_mm3 -> TreatmentAgent label
+
+Reads volumes directly from each timepoint's seg.nii, so it does not require
+a pre-computed tumor_volume.csv. Works on any folder shaped like:
+
+    <patient_dir>/
+        baseline/seg.nii
+        progression/FU{1..N}/seg.nii
+        remission/FU{1..N}/seg.nii
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
 from pathlib import Path
 from typing import Dict, List
 
 import pandas as pd
 
 from src.agent.treatment_agent import TreatmentAgent
+from src.data.paths import RAW_DATA_DIR
 from src.io.nifti_loader import load_mask
-from src.io.tumor_volume_csv import load_tumor_volume_csv
 from src.metrics.volume import compute_tumor_volume
 
 
-def compute_baseline_volume_from_mask(baseline_seg_path: str | Path) -> Dict[str, float]:
-    mask_data, voxel_dims = load_mask(baseline_seg_path)
-    return compute_tumor_volume(mask_data, voxel_dims)
+SCENARIOS = ("progression", "remission")
 
 
-def load_followup_volumes_from_patient_csv(
-    csv_path: str | Path,
-) -> List[Dict[str, float | str]]:
-    df = load_tumor_volume_csv(csv_path)
-
-    required_columns = {"FU", "tumor_volume"}
-    if not required_columns.issubset(df.columns):
-        raise ValueError(
-            f"CSV must contain columns {required_columns}, got {set(df.columns)}"
-        )
-
-    followups = []
-    for _, row in df.iterrows():
-        timepoint = str(row["FU"])
-        volume = row["tumor_volume"]
-
-        if pd.isna(volume):
-            raise ValueError(f"Missing tumor_volume for {timepoint} in {csv_path}")
-
-        followups.append({
-            "timepoint": timepoint,
-            "volume": float(volume),
-        })
-
-    def sort_key(item: Dict[str, float | str]) -> int:
-        tp = str(item["timepoint"]).upper()
-        if tp.startswith("FU"):
-            try:
-                return int(tp.replace("FU", ""))
-            except ValueError:
-                return 999
-        return 999
-
-    followups = sorted(followups, key=sort_key)
-    return followups
+def _volume_info(seg_path: Path) -> Dict[str, float]:
+    mask, voxel_dims = load_mask(seg_path)
+    return compute_tumor_volume(mask, voxel_dims)
 
 
-def run_longitudinal_pipeline_for_branch(
+def _discover_followups(scenario_dir: Path) -> List[Path]:
+    """Return FU folders sorted by their numeric suffix."""
+    fu_dirs = [d for d in scenario_dir.iterdir()
+               if d.is_dir() and re.fullmatch(r"FU\d+", d.name)]
+    return sorted(fu_dirs, key=lambda d: int(d.name[2:]))
+
+
+def _run_branch(
     patient_id: str,
     scenario: str,
     baseline_volume: float,
     baseline_voxel_count: int,
-    followups: List[Dict[str, float | str]],
+    followup_dirs: List[Path],
+    enable_pseudoprogression: bool,
 ) -> List[Dict[str, float | str]]:
-    agent = TreatmentAgent(initial_volume=baseline_volume)
+    agent = TreatmentAgent(
+        initial_volume=baseline_volume,
+        enable_pseudoprogression=enable_pseudoprogression,
+    )
 
-    results = [
-        {
-            "patient_id": patient_id,
-            "scenario": scenario,
-            "timepoint": "Baseline",
-            "volume_mm3": baseline_volume,
-            "voxel_count": baseline_voxel_count,
-            "status": "Baseline",
-        }
-    ]
+    results: List[Dict[str, float | str]] = [{
+        "patient_id": patient_id,
+        "scenario": scenario,
+        "timepoint": "Baseline",
+        "volume_mm3": baseline_volume,
+        "voxel_count": baseline_voxel_count,
+        "status": "Baseline",
+        "raw_status": "Baseline",
+        "percent_change_vs_baseline": 0.0,
+        "percent_change_vs_smallest": 0.0,
+    }]
 
-    for item in followups:
-        evaluation = agent.evaluate(item["volume"])
-
+    for fu_dir in followup_dirs:
+        info = _volume_info(fu_dir / "seg.nii")
+        evaluation = agent.evaluate(info["volume_mm3"])
         results.append({
             "patient_id": patient_id,
             "scenario": scenario,
-            "timepoint": item["timepoint"],
-            "volume_mm3": item["volume"],
+            "timepoint": fu_dir.name,
+            "volume_mm3": info["volume_mm3"],
+            "voxel_count": info["voxel_count"],
             "status": evaluation["status"],
+            "raw_status": evaluation["raw_status"],
             "percent_change_vs_baseline": evaluation["percent_change_vs_baseline"],
             "percent_change_vs_smallest": evaluation["percent_change_vs_smallest"],
-            "smallest_volume_before_update": evaluation["smallest_volume_before_update"],
         })
+
+    # Patch finalised statuses (pseudoprogression may have rewritten earlier ones)
+    final = agent.final_statuses()
+    for i, status in enumerate(final):
+        results[i]["status"] = status
 
     return results
 
 
-def run_patient_pipeline(patient_dir: str | Path) -> pd.DataFrame:
+def run_patient_pipeline(
+    patient_dir: str | Path,
+    enable_pseudoprogression: bool = False,
+) -> pd.DataFrame:
     patient_dir = Path(patient_dir)
     patient_id = patient_dir.name
 
-    baseline_seg_path = patient_dir / "baseline" / "seg.nii"
-    progression_csv_path = patient_dir / "progression" / "tumor_volume.csv"
-    remission_csv_path = patient_dir / "remission" / "tumor_volume.csv"
+    baseline_seg = patient_dir / "baseline" / "seg.nii"
+    if not baseline_seg.exists():
+        raise FileNotFoundError(f"Missing baseline seg: {baseline_seg}")
+    baseline = _volume_info(baseline_seg)
 
-    if not baseline_seg_path.exists():
-        raise FileNotFoundError(f"Missing baseline seg file: {baseline_seg_path}")
+    all_rows: List[Dict[str, float | str]] = []
+    for scenario in SCENARIOS:
+        scen_dir = patient_dir / scenario
+        if not scen_dir.exists():
+            continue
+        fu_dirs = _discover_followups(scen_dir)
+        if not fu_dirs:
+            continue
+        all_rows.extend(_run_branch(
+            patient_id=patient_id,
+            scenario=scenario,
+            baseline_volume=baseline["volume_mm3"],
+            baseline_voxel_count=baseline["voxel_count"],
+            followup_dirs=fu_dirs,
+            enable_pseudoprogression=enable_pseudoprogression,
+        ))
 
-    baseline_info = compute_baseline_volume_from_mask(baseline_seg_path)
-    baseline_volume_mm3 = baseline_info["volume_mm3"]
-    baseline_voxel_count = baseline_info["voxel_count"]
-
-    progression_followups = load_followup_volumes_from_patient_csv(progression_csv_path)
-    remission_followups = load_followup_volumes_from_patient_csv(remission_csv_path)
-
-    progression_results = run_longitudinal_pipeline_for_branch(
-        patient_id=patient_id,
-        scenario="progression",
-        baseline_volume=baseline_volume_mm3,
-        baseline_voxel_count=baseline_voxel_count,
-        followups=progression_followups,
-    )
-
-    remission_results = run_longitudinal_pipeline_for_branch(
-        patient_id=patient_id,
-        scenario="remission",
-        baseline_volume=baseline_volume_mm3,
-        baseline_voxel_count=baseline_voxel_count,
-        followups=remission_followups,
-    )
-
-    all_results = progression_results + remission_results
-    return pd.DataFrame(all_results)
+    return pd.DataFrame(all_rows)
 
 
 def print_results(df: pd.DataFrame) -> None:
     if df.empty:
         print("No results to display.")
         return
-
-    for scenario, scenario_df in df.groupby("scenario"):
+    for scenario, scen_df in df.groupby("scenario"):
         print(f"\nScenario: {scenario}")
-        print("-" * 60)
-
-        for _, row in scenario_df.iterrows():
-            if row["timepoint"] == "Baseline":
-                print(
-                    f"{row['timepoint']}: "
-                    f"{row['volume_mm3']:.2f} mm^3 "
-                    f"(voxel_count={row['voxel_count']}, status={row['status']})"
-                )
+        print("-" * 64)
+        for _, row in scen_df.iterrows():
+            tp = row["timepoint"]
+            vol = row["volume_mm3"]
+            status = row["status"]
+            if tp == "Baseline":
+                print(f"  {tp:9} {vol:10.2f} mm^3   ({status})")
             else:
-                print(
-                    f"{row['timepoint']}: "
-                    f"{row['volume_mm3']:.2f} mm^3 -> {row['status']} "
-                    f"(vs baseline: {row['percent_change_vs_baseline']:.2f}%, "
-                    f"vs smallest: {row['percent_change_vs_smallest']:.2f}%)"
-                )
+                pcb = row["percent_change_vs_baseline"]
+                pcs = row["percent_change_vs_smallest"]
+                print(f"  {tp:9} {vol:10.2f} mm^3 -> {status:24}  "
+                      f"vs baseline: {pcb:+7.2f}%, vs smallest: {pcs:+7.2f}%")
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Run the RANO pipeline on one patient folder.")
+    p.add_argument("--patient-dir", type=Path, required=False,
+                   help="Patient folder (containing baseline/ and progression/ remission/).")
+    p.add_argument("--data-root", type=Path, default=RAW_DATA_DIR,
+                   help=f"If --patient-dir is omitted, pick the first Mets_* folder under this root "
+                        f"(default: {RAW_DATA_DIR}).")
+    p.add_argument("--pseudoprogression", action="store_true",
+                   help="Enable RANO Step-3 pseudoprogression handling.")
+    return p.parse_args()
 
 
 if __name__ == "__main__":
-    PATIENT_DIR = Path("data/raw/Mets_010")
+    args = _parse_args()
+    if args.patient_dir is None:
+        candidates = sorted(p for p in args.data_root.iterdir()
+                            if p.is_dir() and p.name.startswith("Mets_"))
+        if not candidates:
+            raise SystemExit(f"No Mets_* folders found under {args.data_root}")
+        patient_dir = candidates[0]
+    else:
+        patient_dir = args.patient_dir
 
-    try:
-        results_df = run_patient_pipeline(PATIENT_DIR)
-        print(results_df)
-        print_results(results_df)
-    except Exception as e:
-        print(f"Pipeline error: {e}")
+    df = run_patient_pipeline(patient_dir, enable_pseudoprogression=args.pseudoprogression)
+    print_results(df)
