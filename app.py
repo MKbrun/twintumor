@@ -1023,65 +1023,65 @@ with tab_heatmap:
             "(reaction–diffusion PDE or generative segmentation predictor) "
             "would be a master-thesis-scope extension — see *Future work* in the report."
         )
-        st.stop()
 
     # ─────────────── original cohort trajectory matrix view ───────────────
-    st.subheader("Cohort trajectory heatmap")
-    sort_mode = st.radio(
-        "Sort patients by",
-        ["Baseline", "Total change (FU5 − baseline)", "Subject ID"],
-        horizontal=True, key="heatmap_sort",
-    )
-
-    traj_matrix = np.array([get_trajectory(r, selected_scenario) for _, r in df.iterrows()])
-    ids = df["subject"].values
-    if sort_mode == "Baseline":
-        order = np.argsort(traj_matrix[:, 0])
-    elif sort_mode == "Total change (FU5 − baseline)":
-        order = np.argsort(traj_matrix[:, -1] - traj_matrix[:, 0])
     else:
-        order = np.argsort(ids)
+        st.subheader("Cohort trajectory heatmap")
+        sort_mode = st.radio(
+            "Sort patients by",
+            ["Baseline", "Total change (FU5 − baseline)", "Subject ID"],
+            horizontal=True, key="heatmap_sort",
+        )
 
-    sorted_matrix = traj_matrix[order]; sorted_ids = ids[order]
-    fig, ax = plt.subplots(figsize=(9, max(6, len(sorted_ids) * 0.12)))
-    im = ax.imshow(sorted_matrix, aspect="auto", cmap="viridis")
-    ax.set_xticks(range(6)); ax.set_xticklabels(TIME_LABELS)
-    ax.set_yticks(range(len(sorted_ids))); ax.set_yticklabels(sorted_ids, fontsize=6)
-    sel_pos = np.where(sorted_ids == selected_patient)[0]
-    if len(sel_pos): ax.axhline(sel_pos[0], color="red", linewidth=1.2, alpha=0.85)
-    ax.set_xlabel("Timepoint"); ax.set_title(f"Cohort heatmap — {selected_scenario}")
-    fig.colorbar(im, ax=ax, label="Tumor volume (mm³)")
-    st.pyplot(fig)
+        traj_matrix = np.array([get_trajectory(r, selected_scenario) for _, r in df.iterrows()])
+        ids = df["subject"].values
+        if sort_mode == "Baseline":
+            order = np.argsort(traj_matrix[:, 0])
+        elif sort_mode == "Total change (FU5 − baseline)":
+            order = np.argsort(traj_matrix[:, -1] - traj_matrix[:, 0])
+        else:
+            order = np.argsort(ids)
 
-    st.markdown("---")
-    st.subheader("Prediction-error heatmap")
-    model_choice = st.selectbox("Model", ["Exponential", "Gompertz", "ML (Random Forest)"], key="err_heatmap")
+        sorted_matrix = traj_matrix[order]; sorted_ids = ids[order]
+        fig, ax = plt.subplots(figsize=(9, max(6, len(sorted_ids) * 0.12)))
+        im = ax.imshow(sorted_matrix, aspect="auto", cmap="viridis")
+        ax.set_xticks(range(6)); ax.set_xticklabels(TIME_LABELS)
+        ax.set_yticks(range(len(sorted_ids))); ax.set_yticklabels(sorted_ids, fontsize=6)
+        sel_pos = np.where(sorted_ids == selected_patient)[0]
+        if len(sel_pos): ax.axhline(sel_pos[0], color="red", linewidth=1.2, alpha=0.85)
+        ax.set_xlabel("Timepoint"); ax.set_title(f"Cohort heatmap — {selected_scenario}")
+        fig.colorbar(im, ax=ax, label="Tumor volume (mm³)")
+        st.pyplot(fig)
 
-    with st.spinner("Building cohort predictions…"):
-        pred_table = build_cohort_predictions(df, ml_model)
+        st.markdown("---")
+        st.subheader("Prediction-error heatmap")
+        model_choice = st.selectbox("Model", ["Exponential", "Gompertz", "ML (Random Forest)"], key="err_heatmap")
 
-    scen_rows = pred_table[pred_table["scenario"] == selected_scenario].copy()
-    actual = scen_rows[["actual_FU3", "actual_FU4", "actual_FU5"]].values
-    if model_choice == "Exponential":
-        pred = scen_rows[["exp_FU3", "exp_FU4", "exp_FU5"]].values
-    elif model_choice == "Gompertz":
-        pred = scen_rows[["gom_FU3", "gom_FU4", "gom_FU5"]].values
-    else:
-        pred = scen_rows[["ml_FU3", "ml_FU4", "ml_FU5"]].values
+        with st.spinner("Building cohort predictions…"):
+            pred_table = build_cohort_predictions(df, ml_model)
 
-    err = np.abs(actual - pred)
-    err_order = np.argsort(np.nanmean(err, axis=1))
-    err_sorted = err[err_order]
-    ids_sorted = scen_rows["subject"].values[err_order]
-    fig2, ax2 = plt.subplots(figsize=(7, max(6, len(ids_sorted) * 0.12)))
-    im2 = ax2.imshow(err_sorted, aspect="auto", cmap="magma")
-    ax2.set_xticks([0, 1, 2]); ax2.set_xticklabels(["FU3", "FU4", "FU5"])
-    ax2.set_yticks(range(len(ids_sorted))); ax2.set_yticklabels(ids_sorted, fontsize=6)
-    sel_pos = np.where(ids_sorted == selected_patient)[0]
-    if len(sel_pos): ax2.axhline(sel_pos[0], color="cyan", linewidth=1.2, alpha=0.85)
-    ax2.set_xlabel("Future timepoint"); ax2.set_title(f"{model_choice}: |actual − predicted| ({selected_scenario})")
-    fig2.colorbar(im2, ax=ax2, label="Absolute error (mm³)")
-    st.pyplot(fig2)
+        scen_rows = pred_table[pred_table["scenario"] == selected_scenario].copy()
+        actual = scen_rows[["actual_FU3", "actual_FU4", "actual_FU5"]].values
+        if model_choice == "Exponential":
+            pred = scen_rows[["exp_FU3", "exp_FU4", "exp_FU5"]].values
+        elif model_choice == "Gompertz":
+            pred = scen_rows[["gom_FU3", "gom_FU4", "gom_FU5"]].values
+        else:
+            pred = scen_rows[["ml_FU3", "ml_FU4", "ml_FU5"]].values
+
+        err = np.abs(actual - pred)
+        err_order = np.argsort(np.nanmean(err, axis=1))
+        err_sorted = err[err_order]
+        ids_sorted = scen_rows["subject"].values[err_order]
+        fig2, ax2 = plt.subplots(figsize=(7, max(6, len(ids_sorted) * 0.12)))
+        im2 = ax2.imshow(err_sorted, aspect="auto", cmap="magma")
+        ax2.set_xticks([0, 1, 2]); ax2.set_xticklabels(["FU3", "FU4", "FU5"])
+        ax2.set_yticks(range(len(ids_sorted))); ax2.set_yticklabels(ids_sorted, fontsize=6)
+        sel_pos = np.where(ids_sorted == selected_patient)[0]
+        if len(sel_pos): ax2.axhline(sel_pos[0], color="cyan", linewidth=1.2, alpha=0.85)
+        ax2.set_xlabel("Future timepoint"); ax2.set_title(f"{model_choice}: |actual − predicted| ({selected_scenario})")
+        fig2.colorbar(im2, ax=ax2, label="Absolute error (mm³)")
+        st.pyplot(fig2)
 
 
 # ============================================================ TAB 4: compare
@@ -1288,18 +1288,21 @@ with tab_one_patient:
                     "Scenario branch", scenarios_available, horizontal=True,
                 )
                 enable_pseudo_one = st.checkbox(
-                    "RANO pseudoprogression handling (Step 3)",
+                    "RANO pseudoprogression handling",
                     value=True, key="one_patient_pseudo",
                 )
 
+                scan = None
                 with st.spinner(f"Reading {chosen_scenario}/seg.nii files…"):
                     try:
                         scan = read_patient_volumes(pdir, chosen_scenario)
                     except Exception as exc:
                         st.error(f"Could not read patient: {exc}")
-                        st.stop()
 
-                if len(scan.trajectory) < 3:
+                result = None
+                if scan is None:
+                    pass  # error already shown above
+                elif len(scan.trajectory) < 3:
                     st.warning(
                         f"Only {len(scan.trajectory)} timepoint(s) available; need "
                         "baseline + FU1 + FU2 to forecast."
@@ -1309,8 +1312,8 @@ with tab_one_patient:
                         result = forecast_for_patient(scan, ml_model)
                     except Exception as exc:
                         st.error(f"Forecast failed: {exc}")
-                        st.stop()
 
+                if scan is not None and result is not None:
                     observed = result["observed"]
                     actual_future = result["actual_future"]
                     forecasts = result["forecasts"]
