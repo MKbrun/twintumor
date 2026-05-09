@@ -90,9 +90,11 @@ def _load_dataset(csv_path: str, mtime: float) -> pd.DataFrame:
 
 
 @st.cache_resource(show_spinner=False)
-def _load_or_train_model(model_path: str, model_mtime: float):
-    """Cache-keyed on the model file's mtime so retraining auto-invalidates."""
-    return get_or_train(model_path)
+def _load_or_train_model(model_path: str, fallback_csv: str, source_label: str,
+                          model_mtime: float, csv_mtime: float):
+    """Cache-keyed on both the model file and CSV mtimes so retraining
+    or rebuilding the source CSV auto-invalidates the cache."""
+    return get_or_train(model_path, fallback_csv=fallback_csv, source_label=source_label)
 
 
 # ---------------------------------------------------------------- data sources
@@ -103,6 +105,17 @@ DATA_SOURCE_MRI  = "Built from my MRI folder (real volumes)"
 
 def _csv_for_source(source: str) -> Path:
     return DEMO_DATASET_CSV if source == DATA_SOURCE_DEMO else TUMOR_VOLUMES_CSV
+
+
+# Each data source has its own persisted model file, so switching the
+# active source instantly swaps to a model calibrated on that source's
+# distribution. The demo model is committed (anonymised cohort); the MRI
+# model stays local (patient-derived).
+MRI_MODEL_PATH = DEFAULT_ML_MODEL_PATH.parent / "rf_predictor_mri.joblib"
+
+
+def _model_path_for_source(source: str) -> Path:
+    return MRI_MODEL_PATH if source == DATA_SOURCE_MRI else DEFAULT_ML_MODEL_PATH
 
 
 def _model_mtime(path: Path) -> float:
@@ -129,6 +142,34 @@ def _pick_folder_dialog() -> str | None:
 def _ml_with_uncertainty(model, baseline: float, fu1: float, fu2: float):
     """Mean and ±1σ across all forest trees, denormalised to the patient's units."""
     return predict_future_with_uncertainty(model, baseline, fu1, fu2)
+
+
+def _detect_unit(df: pd.DataFrame) -> str:
+    """
+    Return '%' if the dataset looks like an Otsu-derived signal percentage,
+    'mm³' if it looks like a real volume from voxel-count × voxel volume.
+
+    The bundled demo CSV and the AIMI Otsu extractor both produce values
+    bounded in [0, 100], while the legacy seg-voxel-count path produces
+    real mm³ values that are typically in the hundreds-to-thousands.
+    """
+    try:
+        all_cols = [c for c in df.columns if c == "baseline" or c.startswith(("progression_", "remission_"))]
+        if not all_cols:
+            return ""
+        max_val = float(df[all_cols].max().max())
+        return "%" if max_val <= 100.0 else "mm³"
+    except Exception:
+        return ""
+
+
+def _value_label(unit: str) -> str:
+    """Y-axis label that matches the unit."""
+    if unit == "%":
+        return "Tumor signal (% of ROI above Otsu)"
+    if unit == "mm³":
+        return "Tumor volume (mm³)"
+    return "Tumor measurement"
 
 
 # ---------------------------------------------------------------- styling
@@ -165,7 +206,7 @@ st.sidebar.caption("Digital twin for brain-metastasis volume trajectories.")
 
 # We need the cohort + model loaded before patient selection can show the
 # patient list. Default source = demo cohort. The MRI folder is opt-in below.
-model_path = DEFAULT_ML_MODEL_PATH
+model_path = DEFAULT_ML_MODEL_PATH  # provisional; replaced below once active_source is known
 
 # One explicit radio drives the active source. Whatever is selected here is
 # what every tab reads, and what every train button trains on.
@@ -179,6 +220,7 @@ if _chosen == DATA_SOURCE_MRI and not TUMOR_VOLUMES_CSV.exists():
     _chosen = DATA_SOURCE_DEMO
 active_source = _chosen
 csv_path = _csv_for_source(active_source)
+model_path = _model_path_for_source(active_source)
 
 
 # ---------------------------------------------------------------- main page guard
@@ -200,8 +242,15 @@ if not csv_path.exists():
 csv_mtime = csv_path.stat().st_mtime
 df = _load_dataset(str(csv_path), csv_mtime)
 ml_model, training_log, was_trained = _load_or_train_model(
-    str(model_path), _model_mtime(model_path)
+    str(model_path), str(csv_path), active_source,
+    _model_mtime(model_path), csv_mtime,
 )
+
+# Unit-aware labels — the demo CSV and the AIMI Otsu extractor both produce
+# percentages, while the legacy seg-voxel-count path produces real mm³.
+UNIT = _detect_unit(df)
+Y_LABEL = _value_label(UNIT)
+UNIT_TXT = UNIT or "value"
 
 
 # ============================================================ SIDEBAR — patient
@@ -399,25 +448,6 @@ with st.sidebar:
             "(LOPO-CV, cached at training time)"
         )
 
-    # ── Heads-up when the model's training source ≠ what the user is viewing.
-    # Predictions still work, but the model wasn't calibrated to this view's
-    # distribution.
-    last_label = (training_log[-1].source_label if training_log else "").lower()
-    trained_on_demo = "demo" in last_label
-    trained_on_mri  = "mri" in last_label or "your mri" in last_label
-    mismatch = (
-        (active_source == DATA_SOURCE_DEMO and trained_on_mri) or
-        (active_source == DATA_SOURCE_MRI and trained_on_demo)
-    )
-    if mismatch:
-        st.warning(
-            f"You're viewing **{active_source}** but the model was trained on "
-            "a *different* dataset. Predictions will work, but they may be "
-            "miscalibrated for this distribution. To recalibrate, train fresh "
-            "on the currently active dataset (button below).",
-            icon="🔁",
-        )
-
     # ── Training controls — only shown when MRI is active. In demo mode the
     #    model is already trained on the demo CSV at startup, so these buttons
     #    are meaningless there.
@@ -469,12 +499,16 @@ with st.sidebar:
             except Exception as exc:
                 st.error(f"Training failed: {exc}")
     else:
-        # Demo mode: nothing to do here — the model is already trained on
-        # the demo CSV at first launch.
+        # Demo mode: nothing to do here — each data source has its OWN
+        # persisted model file, automatically calibrated to that source's
+        # distribution. Switching the radio above instantly swaps to the
+        # other model.
         st.caption(
-            "Switch to *Your MRI cohort* in *Data source* above to train on "
-            "your own data. While in demo mode there is nothing to retrain — "
-            "the model is auto-fitted to the demo CSV at first launch."
+            "Each data source has its own pre-calibrated model. Switching the "
+            "*Data source* radio above instantly loads the model trained on "
+            "that source — no manual retraining needed. Use *Your MRI cohort* "
+            "to train on your own data; that model is local-only and never "
+            "shared with the demo model."
         )
 
     with st.expander("⚙ Advanced", expanded=False):
@@ -499,14 +533,16 @@ with st.sidebar:
 
         st.markdown("##### Danger zone")
         st.caption(
-            "Deletes the saved model. Next page-load auto-retrains a fresh "
-            "one from the demo cohort (200 trees)."
+            f"Deletes the saved model for **{active_source}** only "
+            f"(`{model_path.name}`). Next page-load auto-retrains a fresh "
+            f"one (200 trees) from the active source's data. The other "
+            f"source's model is untouched."
         )
         st.markdown('<div class="reset-btn">', unsafe_allow_html=True)
-        if st.button("⚠ Reset model to demo-only", width="stretch"):
+        if st.button(f"⚠ Reset {active_source}'s model", width="stretch"):
             if reset_model(model_path):
                 _load_or_train_model.clear()
-                st.success("Model deleted. Reload the page to retrain from demo.")
+                st.success(f"`{model_path.name}` deleted. Reload the page to retrain.")
                 st.rerun()
             else:
                 st.info("No saved model to delete.")
@@ -560,7 +596,7 @@ with tab_single:
         )
         st.warning(
             f"**Data quality notice — `{selected_patient}` / {selected_scenario}**\n\n"
-            f"All six timepoints compute to the same volume (~{trajectory[0]:.0f} mm³). "
+            f"All six timepoints compute to the same value (~{trajectory[0]:.1f} {UNIT_TXT}). "
             "This is **not a forecasting bug**; it means the `seg.nii` files at "
             f"`{selected_patient}/{selected_scenario}/FU*/seg.nii` are byte-identical "
             "copies of the baseline segmentation in the source MRI cohort. "
@@ -607,13 +643,13 @@ with tab_single:
         ax.axvline(x=2, linestyle="--", alpha=0.4, color="gray")
         ax.set_xticks(times_all)
         ax.set_xticklabels(TIME_LABELS)
-        ax.set_xlabel("Timepoint"); ax.set_ylabel("Tumor volume (mm³)")
+        ax.set_xlabel("Timepoint"); ax.set_ylabel(Y_LABEL)
         ax.set_title(f"{selected_patient} – {selected_scenario}")
         ax.grid(True, alpha=0.3); ax.legend(loc="best")
         st.pyplot(fig)
 
     with col_info:
-        st.markdown("### Forecast MAE (mm³)")
+        st.markdown(f"### Forecast MAE ({UNIT_TXT})")
         rows = []
         if forecasts["Exponential"]["ok"]:
             rows.append(("Exponential", exp_err))
@@ -625,7 +661,7 @@ with tab_single:
         st.dataframe(err_df, hide_index=True, width="stretch")
         if rows:
             best = min(rows, key=lambda r: r[1])
-            st.success(f"Best on this case: **{best[0]}** (MAE = {best[1]:.1f} mm³)")
+            st.success(f"Best on this case: **{best[0]}** (MAE = {best[1]:.1f} {UNIT_TXT})")
 
         # Honest framing: this MAE is in-sample if the patient was in the
         # ML training set (which it always is for the active CSV today).
@@ -636,7 +672,7 @@ with tab_single:
             "honest benchmark (model evaluated on a patient it has *never* seen) "
             "is the cohort LOPO-CV: {lopo}.".format(
                 p=selected_patient,
-                lopo=f"**~{cached_lopo:.2f} mm³**" if cached_lopo is not None
+                lopo=f"**~{cached_lopo:.2f} {UNIT_TXT}**" if cached_lopo is not None
                      else "*not cached* (retrain to populate)",
             )
         )
@@ -651,7 +687,7 @@ with tab_single:
     st.markdown("#### Trajectory values and RANO classification")
     table = {
         "timepoint": TIME_LABELS,
-        "actual_mm3": np.round(trajectory, 2),
+        f"actual ({UNIT_TXT})": np.round(trajectory, 2),
         "RANO": rano_statuses,
     }
     if forecasts["Exponential"]["ok"]:
@@ -707,14 +743,14 @@ with tab_cohort:
     if same_scenario:
         fig, ax = plt.subplots(figsize=(11, 6))
         _overlay(ax, selected_scenario)
-        ax.set_xlabel("Timepoint"); ax.set_ylabel("Tumor volume (mm³)")
+        ax.set_xlabel("Timepoint"); ax.set_ylabel(Y_LABEL)
         ax.set_title(f"Cohort overlay — {selected_scenario}")
         st.pyplot(fig)
     else:
         fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
         for ax, scen in zip(axes, ("progression", "remission")):
             _overlay(ax, scen); ax.set_title(scen); ax.set_xlabel("Timepoint")
-        axes[0].set_ylabel("Tumor volume (mm³)")
+        axes[0].set_ylabel(Y_LABEL)
         st.pyplot(fig)
 
     # Nearest neighbours
@@ -739,7 +775,7 @@ with tab_cohort:
              label=f"Selected: {selected_patient}")
     ax2.axvline(x=2, linestyle="--", alpha=0.4, color="gray")
     ax2.set_xticks(range(6)); ax2.set_xticklabels(TIME_LABELS)
-    ax2.set_xlabel("Timepoint"); ax2.set_ylabel("Tumor volume (mm³)")
+    ax2.set_xlabel("Timepoint"); ax2.set_ylabel(Y_LABEL)
     ax2.set_title(f"{k} most similar patients — {selected_scenario}")
     ax2.grid(True, alpha=0.3); ax2.legend(loc="best", fontsize=8)
     st.pyplot(fig2)
@@ -1050,7 +1086,7 @@ with tab_heatmap:
         sel_pos = np.where(sorted_ids == selected_patient)[0]
         if len(sel_pos): ax.axhline(sel_pos[0], color="red", linewidth=1.2, alpha=0.85)
         ax.set_xlabel("Timepoint"); ax.set_title(f"Cohort heatmap — {selected_scenario}")
-        fig.colorbar(im, ax=ax, label="Tumor volume (mm³)")
+        fig.colorbar(im, ax=ax, label=Y_LABEL)
         st.pyplot(fig)
 
         st.markdown("---")
@@ -1080,7 +1116,7 @@ with tab_heatmap:
         sel_pos = np.where(ids_sorted == selected_patient)[0]
         if len(sel_pos): ax2.axhline(sel_pos[0], color="cyan", linewidth=1.2, alpha=0.85)
         ax2.set_xlabel("Future timepoint"); ax2.set_title(f"{model_choice}: |actual − predicted| ({selected_scenario})")
-        fig2.colorbar(im2, ax=ax2, label="Absolute error (mm³)")
+        fig2.colorbar(im2, ax=ax2, label=f"Absolute error ({UNIT_TXT})")
         st.pyplot(fig2)
 
 
@@ -1113,7 +1149,7 @@ with tab_compare:
         bp = ax.boxplot(data, labels=list(model_cols.keys()), patch_artist=True)
         for patch, c in zip(bp["boxes"], ["tab:orange", "tab:green", "tab:blue"]):
             patch.set_facecolor(c); patch.set_alpha(0.6)
-        ax.set_ylabel("MAE (FU3–FU5, mm³)"); ax.set_title("Per-patient forecast MAE distribution")
+        ax.set_ylabel(f"MAE (FU3–FU5, {UNIT_TXT})"); ax.set_title("Per-patient forecast MAE distribution")
         ax.grid(True, axis="y", alpha=0.3); st.pyplot(fig)
 
     with col_b:
@@ -1121,7 +1157,7 @@ with tab_compare:
         summary = mae_df.groupby(["Model", "Scenario"])["MAE"].mean().unstack()
         summary = summary.reindex(list(model_cols.keys()))
         summary.plot(kind="bar", ax=ax, color=["tab:cyan", "tab:red"])
-        ax.set_ylabel("Mean MAE (mm³)"); ax.set_title("Mean MAE by scenario")
+        ax.set_ylabel(f"Mean MAE ({UNIT_TXT})"); ax.set_title("Mean MAE by scenario")
         ax.grid(True, axis="y", alpha=0.3); plt.xticks(rotation=0)
         st.pyplot(fig)
 
@@ -1350,7 +1386,7 @@ with tab_one_patient:
 
                     ax.axvline(x=2, linestyle="--", alpha=0.4, color="gray")
                     ax.set_xticks(times_all); ax.set_xticklabels(TIME_LABELS)
-                    ax.set_xlabel("Timepoint"); ax.set_ylabel("Tumor volume (mm³)")
+                    ax.set_xlabel("Timepoint"); ax.set_ylabel(Y_LABEL)
                     ax.set_title(f"{pdir.name} — {chosen_scenario}")
                     ax.grid(True, alpha=0.3); ax.legend(loc="best")
                     st.pyplot(fig)
@@ -1375,16 +1411,16 @@ with tab_one_patient:
                                      hide_index=True, width="stretch")
 
                     # Volumes + RANO
-                    st.markdown("##### Volumes + RANO classification")
+                    st.markdown("##### Per-timepoint values + RANO classification")
                     rano_table = {
                         "timepoint": TIME_LABELS[:n_obs],
-                        "volume_mm3": np.round(scan.trajectory, 2),
+                        f"value ({UNIT_TXT})": np.round(scan.trajectory, 2),
                         "RANO": rano_labels,
                     }
                     st.dataframe(pd.DataFrame(rano_table), hide_index=True, width="stretch")
 
                     # Future predictions table
-                    st.markdown("##### Forecast (FU3..FU5) in mm³")
+                    st.markdown(f"##### Forecast (FU3..FU5) in {UNIT_TXT}")
                     pred_rows = {"timepoint": ["FU3", "FU4", "FU5"]}
                     if forecasts["Exponential"]["ok"]:
                         pred_rows["exponential"] = np.round(forecasts["Exponential"]["future"], 2).tolist()

@@ -254,18 +254,19 @@ def train_incremental(
     csv_path: str | Path,
     source_label: str,
     model_path: str | Path = DEFAULT_ML_MODEL_PATH,
-    demo_csv: str | Path = DEMO_DATASET_CSV,
     n_new_trees: int = DEFAULT_INCREMENTAL_TREES,
 ) -> Tuple[RandomForestRegressor, List[TrainingRound]]:
     """
     Add `n_new_trees` trees fitted on `csv_path` to the persisted model.
-    If no persisted model exists, a fresh demo-trained one is created first.
+    If no persisted model exists at `model_path`, cold-start on the same
+    `csv_path` so the very first round trains on the active source's data
+    (rather than always falling back to demo).
     """
     model_path = Path(model_path)
 
     bundle = _load_bundle(model_path)
     if bundle is None:
-        train_initial_from_demo(model_path, demo_csv)
+        train_fresh_from(csv_path=csv_path, source_label=source_label, model_path=model_path)
         bundle = _load_bundle(model_path)
     assert bundle is not None
     model: RandomForestRegressor = bundle["model"]
@@ -294,16 +295,29 @@ def train_incremental(
 
 def get_or_train(
     model_path: str | Path = DEFAULT_ML_MODEL_PATH,
-    demo_csv: str | Path = DEMO_DATASET_CSV,
+    fallback_csv: str | Path = DEMO_DATASET_CSV,
+    source_label: str = "Bundled demo CSV",
 ) -> Tuple[RandomForestRegressor, List[TrainingRound], bool]:
-    """Load the persisted model; train an initial demo model if missing."""
+    """
+    Load the persisted model. If the file is missing or has an obsolete
+    schema, train a fresh model on `fallback_csv` and save it. The
+    `source_label` is recorded in the training log of the new model.
+
+    With this signature the caller controls which CSV provides the
+    cold-start training data — used to give each data source (demo, MRI)
+    its own pre-calibrated model file.
+    """
     model_path = Path(model_path)
     bundle = _load_bundle(model_path)
     if bundle is not None:
         model = bundle["model"]
         log = [TrainingRound(**r) for r in bundle["training_log"]]
         return model, log, False
-    model, log = train_initial_from_demo(model_path, demo_csv)
+    model, log = train_fresh_from(
+        csv_path=fallback_csv,
+        source_label=source_label,
+        model_path=model_path,
+    )
     return model, log, True
 
 

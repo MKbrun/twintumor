@@ -58,6 +58,49 @@ def test_read_patient_invalid_scenario(fake_patient):
         read_patient_volumes(fake_patient, "junk")
 
 
+@pytest.fixture
+def aimi_layout_patient(tmp_path) -> Path:
+    """AIMI layout — only baseline/seg.nii, plus t1_gd.nii at every timepoint."""
+    p = tmp_path / "Mets_aimi"
+    seg = np.zeros((6, 6, 6), dtype=np.uint8)
+    seg[2:5, 2:5, 2:5] = 1                  # 27 ROI voxels
+    _make_seg(p / "baseline" / "seg.nii", 10)  # any seg shape; we'll overwrite
+    # Replace baseline seg with our 27-voxel block
+    import nibabel as nib
+    nib.save(nib.Nifti1Image(seg.astype(np.float32), np.eye(4)),
+             str(p / "baseline" / "seg.nii"))
+    # Baseline t1_gd: gradient pattern inside ROI so Otsu has a real threshold.
+    base_t1 = np.where(seg, 0.9, 0.05).astype(np.float32)
+    nib.save(nib.Nifti1Image(base_t1, np.eye(4)), str(p / "baseline" / "t1_gd.nii"))
+    # FUs (no seg.nii — AIMI layout).
+    for scenario in ("progression", "remission"):
+        for i in range(1, 6):
+            t1 = base_t1 + (0.0 if scenario == "remission" else 0.0)
+            (p / scenario / f"FU{i}").mkdir(parents=True, exist_ok=True)
+            nib.save(nib.Nifti1Image(t1, np.eye(4)),
+                     str(p / scenario / f"FU{i}" / "t1_gd.nii"))
+    return p
+
+
+def test_read_patient_volumes_aimi_layout_uses_otsu(aimi_layout_patient):
+    """AIMI layout (no FU seg.nii) — should NOT silently return only baseline.
+    Should compute per-FU values via Otsu within the baseline ROI."""
+    scan = read_patient_volumes(aimi_layout_patient, "progression")
+    # Should produce all 5 FUs, not just baseline
+    assert len(scan.trajectory) == 6
+    assert set(scan.timepoints) == {"FU1", "FU2", "FU3", "FU4", "FU5"}
+    # All values should be in [0, 100] because Otsu produces percentages
+    for v in scan.trajectory:
+        assert 0.0 <= v <= 100.0
+
+
+def test_read_patient_volumes_aimi_missing_baseline_t1_raises(aimi_layout_patient):
+    """If AIMI layout is missing baseline/t1_gd.nii, we can't compute Otsu."""
+    (aimi_layout_patient / "baseline" / "t1_gd.nii").unlink()
+    with pytest.raises(FileNotFoundError):
+        read_patient_volumes(aimi_layout_patient, "progression")
+
+
 def test_read_patient_missing_baseline(tmp_path):
     p = tmp_path / "Mets_xx"
     _make_seg(p / "progression" / "FU1" / "seg.nii", 5)

@@ -73,17 +73,19 @@ def test_incremental_grows_forest(tmp_model_path, tmp_csv):
 
 
 def test_incremental_creates_initial_if_missing(tmp_model_path, tmp_csv):
+    """When no model exists, train_incremental cold-starts on the same
+    csv_path it's adding from (no demo fallback) so each source's model
+    is calibrated to that source from the very first round."""
     assert not tmp_model_path.exists()
     model, log = train_incremental(
         csv_path=tmp_csv,
         source_label="cold-start cohort",
         model_path=tmp_model_path,
-        demo_csv=DEMO_DATASET_CSV,
         n_new_trees=30,
     )
-    # First round = demo training; second = the cold-start cohort
+    # First round = cold-start on csv_path; second = +30 trees from csv_path
     assert len(log) == 2
-    assert "Bundled demo" in log[0].source_label
+    assert "cold-start cohort" in log[0].source_label
     assert log[1].source_label == "cold-start cohort"
     assert len(model.estimators_) == log[0].trees_after + 30
 

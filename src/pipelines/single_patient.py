@@ -68,7 +68,20 @@ def read_patient_volumes(
     patient_dir: str | Path,
     scenario: str,
 ) -> ScanVolumes:
-    """Read baseline + every FU{N}/seg.nii present for one scenario branch."""
+    """
+    Read baseline + each available FU for one scenario branch.
+
+    Auto-detects the folder layout:
+      * **Legacy layout** — every FU folder has its own `seg.nii`. Per-FU
+        value = tumor volume in mm³ (voxel count × voxel volume).
+      * **AIMI layout** — only `baseline/seg.nii` exists; FU folders contain
+        `t1_gd.nii`. Per-FU value = percentage of in-baseline-ROI voxels
+        with `t1_gd` intensity above the baseline-anchored Otsu threshold.
+
+    The same `ScanVolumes` shape is returned in either case; downstream
+    forecasting works on baseline-relative ratios, so the unit is
+    irrelevant to the model.
+    """
     patient_dir = Path(patient_dir)
     if scenario not in SCENARIOS:
         raise ValueError(f"scenario must be one of {SCENARIOS}")
@@ -85,18 +98,67 @@ def read_patient_volumes(
     if not fu_dirs:
         raise FileNotFoundError(f"No FU* folders under {scenario_dir}")
 
-    volumes: Dict[str, float] = {}
-    for fu in fu_dirs:
-        seg = fu / "seg.nii"
-        if not seg.exists():
-            continue
-        volumes[fu.name] = _vol_mm3(seg)
+    # Layout detection: do any FU folders have seg.nii?
+    legacy_layout = any((fu / "seg.nii").exists() for fu in fu_dirs)
 
-    return ScanVolumes(
-        scenario=scenario,
-        baseline=_vol_mm3(baseline_seg),
-        timepoints=volumes,
+    if legacy_layout:
+        baseline_value = _vol_mm3(baseline_seg)
+        volumes: Dict[str, float] = {}
+        for fu in fu_dirs:
+            seg = fu / "seg.nii"
+            if seg.exists():
+                volumes[fu.name] = _vol_mm3(seg)
+        return ScanVolumes(scenario=scenario, baseline=baseline_value, timepoints=volumes)
+
+    # AIMI layout: Otsu within the baseline ROI on t1_gd, baseline-anchored.
+    from src.io.mri_loader import load_mri_volume
+    from src.pipelines.otsu_signal_extractor import (
+        otsu_threshold,
+        signal_percent_in_roi,
     )
+
+    baseline_t1 = patient_dir / "baseline" / "t1_gd.nii"
+    if not baseline_t1.exists():
+        raise FileNotFoundError(
+            f"AIMI layout requires baseline/t1_gd.nii alongside seg.nii: {baseline_t1}"
+        )
+
+    seg_3d, _ = load_mask(baseline_seg)
+    roi = seg_3d > 0
+    if not roi.any():
+        raise ValueError(f"Baseline seg.nii has no foreground voxels: {baseline_seg}")
+
+    base_t1_data, _ = load_mri_volume(baseline_t1)
+    if base_t1_data.shape != roi.shape:
+        raise ValueError(
+            f"baseline t1_gd shape {base_t1_data.shape} does not match "
+            f"seg shape {roi.shape}"
+        )
+    base_inside = base_t1_data[roi].astype(float)
+    base_threshold = otsu_threshold(base_inside)
+    base_mean = float(base_inside.mean())
+
+    baseline_value = float(signal_percent_in_roi(base_t1_data, roi)["percent"])
+
+    volumes = {}
+    for fu in fu_dirs:
+        fu_t1 = fu / "t1_gd.nii"
+        if not fu_t1.exists():
+            continue
+        try:
+            t1_data, _ = load_mri_volume(fu_t1)
+        except Exception:
+            continue
+        if t1_data.shape != roi.shape:
+            continue
+        stats = signal_percent_in_roi(
+            t1_data, roi,
+            fixed_threshold=base_threshold,
+            target_mean=base_mean,
+        )
+        volumes[fu.name] = float(stats["percent"])
+
+    return ScanVolumes(scenario=scenario, baseline=baseline_value, timepoints=volumes)
 
 
 def forecast_for_patient(
