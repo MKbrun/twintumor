@@ -3,7 +3,7 @@
 Digital-twin framework for brain-metastasis volume trajectories from longitudinal MRI.
 
 The framework reads segmentation masks (`seg.nii`) at each timepoint, computes
-real tumor volumes in mm³, runs three forecasting models on the first three
+real tumor volumes in %, runs three forecasting models on the first three
 timepoints (Baseline, FU1, FU2) to predict the next three (FU3, FU4, FU5),
 and classifies each timepoint with a RANO-style rule agent.
 
