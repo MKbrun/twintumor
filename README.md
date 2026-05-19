@@ -74,6 +74,10 @@ in-framework extractor.
 
 ## Setup
 
+Make sure Python 3 is installed before running the project.
+
+Clone the repository and install the required dependencies.
+
 On Windows:
 ```
 python -m venv .venv
@@ -88,9 +92,31 @@ pip install -r requirements.txt
 ```
 ## Run the demo
 
-```
+Start the Streamlit application with:
+
+```bash
 streamlit run app.py
 ```
+
+If Streamlit is not recognized, try:
+```bash
+python -m streamlit run app.py
+```
+
+or on MacOS/Linux:
+```bash
+python3 -m streamlit run app.py
+```
+
+After starting Streamlit, the terminal will display both a Local URL and a Network URL.
+
+Example:
+```text
+Local URL:    http://localhost:8501
+Network URL:  http://192.168.x.x:8501
+```
+- The Local URL can be opened on the same computer.
+- The Network URL can be used by other devices on the same network.
 
 In the sidebar:
 
